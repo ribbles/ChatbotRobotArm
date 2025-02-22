@@ -18,10 +18,17 @@ from lsc_servo_client import LSCServoController
 # faulthandler.register(signal.SIGINT)
 
 
+ARM_SERIAL_PORT = "auto"
+WEBCAM_URL = "http://10.0.0.27"
+OLLAMA_URL = "http://10.0.0.205:11434/api/chat"
+# OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+OLLAMA_MODEL = "llama3.2-vision"
+
+
 CHATBOT_INITIAL_PROMPT = """
 You are controlling a 6DOF robotic arm that has 6 servos and a webcam.
-Every user request includes the latest webcam image (even if the request text is empty) to give you real-time visual context.
-Use that image to inform how you move the arm.
+Every user request includes the latest webcam image (even if the request text is empty) to give you real-time visual context of where the arm moved to.
+Use that image to inform how you move the arm next.
 Your responses must be strictly formatted as JSON. The JSON structure is defined as follows:
 {
   "message": "Optional human-readable message for feedback.",  // the user will see this
@@ -38,6 +45,7 @@ Guidelines:
 - If you include tool_calls, each tool_call object must have the fields: servo_id, position, and time_ms.
 - You can include zero, one, or multiple tool_call objects in the tool_calls array.
 - Your output must not include any extra text or formatting outside of valid JSON.
+I suggest that the response message comment on how the arm moved so you remember which way each servo moves.
 Now, with the current webcam image in hand, please confirm that you are ready by executing an initial command.
 For example, you might start by moving the arm slightly to signal readiness.
 If you can't see the arm, please stop sending tool_calls and report as such in the message.
@@ -81,13 +89,6 @@ FORMAT = {
         }
     }
 }
-
-
-ARM_SERIAL_PORT = "COM7"
-WEBCAM_URL = "http://10.0.0.27"
-OLLAMA_URL = "http://10.0.0.205:11434/api/chat"
-# OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL = "llama3.2-vision"
 
 
 def run():

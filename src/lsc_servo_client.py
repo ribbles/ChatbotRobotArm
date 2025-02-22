@@ -4,6 +4,9 @@ import time
 
 from typing import List
 
+# Obtained from Device Manager (Windows), lsusb (Linux)
+COM_PORT_NAME = "Arduino Leonardo"
+
 class LSCServoController:
     HEADER = [0x55, 0x55]  # Packet header
     BAUD_RATE = 9600
@@ -26,10 +29,23 @@ class LSCServoController:
         6: [500, 2500],
     }
 
-    def __init__(self, port: str):
+    def __init__(self, port: str = "auto"):
         # https://pyserial.readthedocs.io/en/latest/pyserial_api.html
+        if port is None or port == "auto":
+            port = LSCServoController.detect_serial_port()
         self.ser = serial.Serial(port, self.BAUD_RATE, timeout=3, write_timeout=3)
         time.sleep(2)  # Allow time for serial to initialize
+
+    @staticmethod
+    def detect_serial_port() -> str:
+        import serial.tools.list_ports
+        ports = serial.tools.list_ports.comports()
+        for port, desc, hwid in ports:
+            if COM_PORT_NAME in desc:
+                print("Found serial port %s %s", port, desc)
+                return port
+        raise Exception("Serial port not found")
+
 
     def send_command(self, command: int, params: list[int]):
         length = len(params) + 2  # Length includes command and length byte itself
@@ -110,4 +126,7 @@ class LSCServoController:
             self.unload_servos(list(self.SERVO_LIMITS.keys()))
         except Exception:
             pass
-        self.ser.close()
+        try:
+            self.ser.close()
+        except Exception:
+            pass

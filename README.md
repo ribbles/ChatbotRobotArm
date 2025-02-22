@@ -25,12 +25,13 @@ https://github.com/user-attachments/assets/b9038b2b-4e73-424a-8994-d9c9cfb3754c
 1. [Text-To-Speach](https://github.com/nateshmbhat/pyttsx3#readme) to speak the chatbots' responses - runs offline
 1. [Speach Recognition](https://github.com/Uberi/speech_recognition#readme) to listen for commands
 1. Python3.11 (No dependency on this version)
-1. Windows 10 (No dependency on this version)
+1. Windows 10 (No dependency on this Platform)
 
 # Next Steps
 1. Evaluate online chatbots to speed up evaluation
 1. Evaluate whether a second camera, and/or other angles helps chatbot understanding
 1. Add interfaces to allow different hardware and APIs to be configured
+1. Find a vision aware model that uses Ollamas newer "tools" interface
 
 # Installation
 ```
