@@ -1,0 +1,5 @@
+pyserial==3.5
+pyttsx3==2.98
+SpeechRecognition==3.14.1
+Pillow==9.3.0
+PyAudio==0.2.14
