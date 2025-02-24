@@ -1,7 +1,9 @@
+import os
 import faulthandler
 import requests
 import signal
 import base64
+import logging
 from time import sleep
 import json
 from io import BytesIO
@@ -14,8 +16,37 @@ from typing import Dict, List
 from lsc_servo_client import LSCServoController
 
 
-# faulthandler.enable()
-# faulthandler.register(signal.SIGINT)
+class ColorFormatter(logging.Formatter):
+    COLORS = {
+        "DEBUG": "\033[94m",  # Blue
+        "INFO": "\033[92m",   # Green
+        "WARNING": "\033[93m", # Yellow
+        "ERROR": "\033[91m",   # Red
+        "CRITICAL": "\033[95m" # Magenta
+    }
+    RESET = "\033[0m"
+
+    def format(self, record):
+        log_color = self.COLORS.get(record.levelname, self.RESET)
+        record.levelname = f"{log_color}{record.levelname}{self.RESET}"
+        return super().format(record)
+
+
+def setup_logging():
+    handler = logging.StreamHandler()
+    formatter = ColorFormatter(
+        "%(asctime)s.%(msecs)03d\t%(levelname)s\t%(name)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    handler.setFormatter(formatter)
+    logger = logging.getLogger()
+    logger.handlers = [handler]
+    logging.getLogger("connectionpool").setLevel(logging.DEBUG)
+
+
+setup_logging()
+log = logging.getLogger("RobotArm")
+log.setLevel(logging.DEBUG)
 
 
 ARM_SERIAL_PORT = "auto"
@@ -26,26 +57,26 @@ OLLAMA_MODEL = "llama3.2-vision"
 
 
 CHATBOT_INITIAL_PROMPT = """
-You are controlling a 6DOF robotic arm that has 6 servos and a webcam.
-Every user request includes the latest webcam image (even if the request text is empty) to give you real-time visual context of where the arm moved to.
-Use that image to inform how you move the arm next.
-Your responses must be strictly formatted as JSON. The JSON structure is defined as follows:
+You are controlling a 6DOF robotic arm and a webcam.
+Every user request includes up to 4 webcam images in a mosaic to give you real-time visual context. 
+Top-left is latest, followed by top-right, bottom-left & lower-right.
+Use the images to inform how you move the arm.
+Responses must be strictly formatted as JSON, structure as follows:
 {
   "message": "Optional human-readable message for feedback.",  // the user will see this
   "tool_calls": [
     {
       "servo_id": 1,          // A number between 1 and 6 indicating the servo to move. 1 is the pincer.
       "position": 1500,       // A number between 500 and 2500 representing the target position, except servo 1 which is limited to the range 1200 to 1800.
-      "time_ms": 1000         // Time in milliseconds for the move to complete. Please keep your movements between 1-5 seconds.
     }
   ]
 }
 Guidelines:
-- Both the "message" and "tool_calls" keys are optional.
-- If you include tool_calls, each tool_call object must have the fields: servo_id, position, and time_ms.
-- You can include zero, one, or multiple tool_call objects in the tool_calls array.
-- Your output must not include any extra text or formatting outside of valid JSON.
-I suggest that the response message comment on how the arm moved so you remember which way each servo moves.
+- Each reponse creates a single arm movement, of 1 or more servos
+- Both the "message" and "tool_calls" keys are optional
+- If you include tool_calls, each tool_call object must have the fields servo_id & position
+- You can include zero, one, or multiple tool_call objects in the tool_calls array
+- Use the "message" field to summarise your actions and help rememeber what you have done.
 Now, with the current webcam image in hand, please confirm that you are ready by executing an initial command.
 For example, you might start by moving the arm slightly to signal readiness.
 If you can't see the arm, please stop sending tool_calls and report as such in the message.
@@ -73,17 +104,11 @@ FORMAT = {
                     "type": "integer",
                     "minimum": 500,
                     "maximum": 2500,
-                },
-                "time_ms": {
-                    "type": "integer",
-                    "minimum": 1000,
-                    "maximum": 5000,
                 }
                 },
                 "required": [
                     "servo_id",
-                    "position",
-                    "time_ms"
+                    "position"
                 ]
             }
         }
@@ -92,87 +117,95 @@ FORMAT = {
 
 
 def run():
-    """
-        1. Ask user for prompt
-        1. Capture image
-        1. Send prompt & image to chatbot
-        1. Recieve response from chatbot
-        1. Forward message to user
-        1. Forward commands to robot
-        1. Capture errors from commands for next prompt
-        1. Repeat
-    """
     ollama_chat = None
-    print("Initialize text-to-speech engine...")
+    log.debug("Initializing Text-to-speech engine...")
     tts_engine = pyttsx3.init()
-    try:
-        tts_engine.say("Robot Overlord beginning boot sequence.")
-        tts_engine.runAndWait()
-        print("Done.")
-        print("")
+    log.debug("Initializing Speech-to-text engine...")
+    recognizer = sr.Recognizer()
 
-        print("Initializing camera...")
-        image = fetch_image_from_url(WEBCAM_URL)
-        print("Image acquired with size ", len(image), " bytes starting with: " , image[0:20], " and ending with ", image[-20:])
-        print()
-
-        print("Initializing arm...")
-        arm = LSCServoController(ARM_SERIAL_PORT)
-        print("Done.")
-        print("")
-
-        print("Initializing chatbot...")
-        ollama_chat = build_prompt(CHATBOT_INITIAL_PROMPT, image)
-        response = chat(OLLAMA_URL, ollama_chat)
-        message = response["message"]
-        ollama_chat["messages"].append(message)
-        content = json.loads(message["content"])
-        print("ROBOT: ", content["message"])
-        tts_engine.say(content["message"])
-        tts_engine.runAndWait()
-        if "tool_calls" not in content or len(content["tool_calls"]) == 0:
-            print("No more commands. Exiting.... details:", content)
-            return
-        tool_calls = content["tool_calls"]
-        print("\t\tCommands:")
-        for tool_call in tool_calls:
-            print("\t\t\t", tool_call)
-        send_commands_to_arm(arm, tool_calls)
-        print("Done.")
-        print("")
-
-        while True:
-            tts_engine.say("What would you like me to do?")
+    with sr.Microphone() as source:
+        try:
+            tts_engine.say("Robot Overlord beginning boot sequence.")
             tts_engine.runAndWait()
-            user_prompt = listen()
-            loop(arm, tts_engine, ollama_chat, user_prompt)
 
-    finally:
-        ollama_chat["images"] = ["deleted"]
-        print("ollama_chat:", json.dumps(ollama_chat))
-        tts_engine.stop()
+            log.debug("Initializing arm...")
+            arm = LSCServoController(ARM_SERIAL_PORT)
+
+            ollama_chat = build_prompt()
+            user_prompt = CHATBOT_INITIAL_PROMPT
+            while True:
+                if user_prompt:
+                    loop(arm, tts_engine, ollama_chat, user_prompt)
+                tts_engine.say("What would you like me to do?")
+                tts_engine.runAndWait()
+                user_prompt = listen(source, recognizer)
+
+        finally:
+            try:
+                ollama_chat["images"] = ["deleted"]
+                log.info("ollama_chat log", extra={"data": ollama_chat})
+            except Exception:
+                pass
+            try:
+                tts_engine.stop()
+            except Exception:
+                pass
     
 def loop(arm, tts_engine, ollama_chat: Dict, user_prompt: str):
     while True:
-        ollama_chat["images"] = [fetch_image_from_url(WEBCAM_URL)]
+        # generate image
+        IMAGE_HISTORY.append(fetch_image_from_url(WEBCAM_URL))
+        ollama_chat["images"] = [build_image_montage()]
+        # send prompt
         ollama_chat["messages"].append({"role":"user","content":user_prompt})
         response = chat(OLLAMA_URL, ollama_chat)
+        log.debug("ollama response", extra={"data": response})
+        # parse response
         message = response["message"]
         ollama_chat["messages"].append(message)
         content = json.loads(message["content"])
-        print("ROBOT: ", content["message"])
+        # display and speak response
+        log.warning("ROBOT: %s", content["message"])
         if content["message"]:
             tts_engine.say(content["message"])
             tts_engine.runAndWait()
+        # validation
         if "tool_calls" not in content or len(content["tool_calls"]) == 0:
-            print("No more commands. Exiting.... details:", content)
+            log.info("No more commands. Exiting")
             return
+        # command robot arm
         tool_calls = content["tool_calls"]
-        print("\t\tCommands:")
+        log.warning("\tCommands")
         for tool_call in tool_calls:
-            print("\t\t\t", tool_call)
+            log.warning("\t\t%s", tool_call)
         send_commands_to_arm(arm, tool_calls)
+        # since chatbot hasn't stopped sending commands, keep prompting for more
         user_prompt = "Here's the latest image from the webcam. Please continue..."
+
+# base64 encoded
+IMAGE_HISTORY: List[str] = []
+
+def build_image_montage() -> str:
+    images = [Image.open(BytesIO(base64.b64decode(img))) for img in IMAGE_HISTORY[-4:]]
+    images.reverse()
+
+    widths, heights = zip(*(img.size for img in images))
+    new_width, new_height = max(widths) * 2, max(heights) * 2
+
+    image = Image.new("RGB", (new_width, new_height))
+    image.paste(images[0], (0, 0))
+    if len(images) > 1:
+        image.paste(images[1], (max(widths), 0))
+    if len(images) > 2:
+        image.paste(images[2], (0, max(heights)))
+    if len(images) > 3:
+        image.paste(images[3], (max(widths), max(heights)))
+
+    output_buffer = BytesIO()
+    image.save(output_buffer, format="JPEG")
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    image.save(os.path.join(current_dir, "image.jpg"))
+    return base64.b64encode(output_buffer.getvalue()).decode('utf-8')
 
 def fetch_image_from_url(url: str) -> str:
     with requests.get(url, stream=True, timeout=5) as response:
@@ -194,24 +227,19 @@ def fetch_image_from_url(url: str) -> str:
                 break
 
     image_data = buffer[:buffer.index(b"\xff\xd9") + 2]
-
-    # Validate image integrity
-    try:
-        img = Image.open(BytesIO(image_data))
-        img.verify()  # Will raise an error if the image is corrupt
-    except Exception as e:
-        raise RuntimeError(f"Incomplete or corrupt image received: {e}") from e
-
     return base64.b64encode(image_data).decode('utf-8')
 
-def build_prompt(prompt: str, base64_image: str) -> Dict:
+def build_prompt() -> Dict:
     return {
         "model": OLLAMA_MODEL,
-        "messages": [{"role":"user","content":prompt}],
+        "messages": [],
         "stream": False,
+        "options": {
+            "temperature": 1.0
+        },
         "keep_alive": 20 * 60,  # 20 minutes
         "format": FORMAT,
-        "images":[base64_image]
+        "images":[]
     }
 
 def chat(url: str, prompt: Dict) -> Dict:
@@ -220,45 +248,46 @@ def chat(url: str, prompt: Dict) -> Dict:
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
+        log.exception("Exception getting camera image")
         if isinstance(e, requests.exceptions.HTTPError):
-            print("Request Headers:", e.response.request.headers)
-            print("Request Body:", e.response.request.body[0:100])
-            print("Response Headers:", e.response.headers)
-            print("Response Body:", e.response.text[0:100])
+            log.debug("Request Headers:", e.response.request.headers)
+            log.debug("Request Body:", e.response.request.body[0:100])
+            log.debug("Response Headers:", e.response.headers)
+            log.debug("Response Body:", e.response.text[0:100])
         raise 
 
 def send_commands_to_arm(arm: LSCServoController, commands: List[Dict]):
     servo_ids = []
     positions = []
-    time_mss = []
+
     for cmd in commands:
-        assert 1 <= cmd["servo_id"] <= 6
-        assert 500 <= cmd["position"] <= 2500
-        assert cmd["servo_id"] != 1 or 1200 <= cmd["position"] <= 1800
-        assert 1000 <= cmd["time_ms"] <= 5000
+        assert 1 <= cmd["servo_id"] <= 6, cmd["servo_id"]
+        assert 500 <= cmd["position"] <= 2500, cmd["position"]
+        assert cmd["servo_id"] != 1 or 1200 <= cmd["position"] <= 1800, cmd["position"]
         servo_ids.append(cmd["servo_id"])
         positions.append(cmd["position"])
-        time_mss.append(cmd["time_ms"])
-    arm.move_servos(servo_ids, positions, max(time_mss))
+    arm.move_servos(servo_ids, positions, 2000)
+    try:
+        log.info("servo positions:", arm.read_servo_positions())
+    except Exception as e:
+        log.debug("Error getting servo positions")
 
-def listen() -> str:
+def listen(source, recognizer) -> str:
     # return "Pick up the die"
     """Capture speech and convert it to text."""
-    recognizer = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("Listening...")
-        recognizer.adjust_for_ambient_noise(source)  # Adjust to background noise
-        try:
-            audio = recognizer.listen(source, timeout=5)  # Listen for 5 seconds
-            text = recognizer.recognize_google(audio)  # Convert speech to text
-            print("Heard: ", text)
-            return text
-        except sr.UnknownValueError:
-            print("I didn't understand.")
-            return listen()
-        except sr.RequestError:
-            print("Speech recognition service unavailable.")
-            raise
+    recognizer.adjust_for_ambient_noise(source)  # Adjust to background noise
+    try:
+        log.debug("Listening...")
+        audio = recognizer.listen(source, timeout=10)  # Listen for 5 seconds
+        text = recognizer.recognize_google(audio)  # Convert speech to text
+        log.warning("Heard: %s", text)
+        return text
+    except sr.UnknownValueError:
+        log.warning("I didn't understand.", exc_info=True)
+        return None
+    except sr.RequestError:
+        log.exception("Speech recognition service unavailable.")
+        raise
 
 if __name__ == "__main__":
     run()

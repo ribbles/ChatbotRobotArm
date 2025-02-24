@@ -21,6 +21,7 @@ https://github.com/user-attachments/assets/b9038b2b-4e73-424a-8994-d9c9cfb3754c
 1. [ESP32-CAM Webcam](https://amzn.to/4gTPbdn) flashed with [Webcam Software](https://RandomNerdTutorials.com/esp32-cam-video-streaming-web-server-camera-home-assistant/)
 1. [USB to serial UART](https://amzn.to/3D4k00X) to control arm from PC (No dependency on this hardware)
 1. [Ollama](https://www.ollama.com/) as the "offline" chatbot
+1. GPU - I picked up a [Nvidia TESLA m40 24GB](https://ebay.us/tPNMRD) for $70 on ebay
 1. [llama3.2-vision model](https://ollama.com/library/llama3.2-vision) as it accepts image input
 1. [Text-To-Speach](https://github.com/nateshmbhat/pyttsx3#readme) to speak the chatbots' responses - runs offline
 1. [Speach Recognition](https://github.com/Uberi/speech_recognition#readme) to listen for commands

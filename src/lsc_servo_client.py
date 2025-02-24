@@ -1,3 +1,4 @@
+import logging
 import serial
 import struct
 import time
@@ -6,6 +7,10 @@ from typing import List
 
 # Obtained from Device Manager (Windows), lsusb (Linux)
 COM_PORT_NAME = "Arduino Leonardo"
+
+
+log = logging.getLogger("LSCServoController")
+
 
 class LSCServoController:
     HEADER = [0x55, 0x55]  # Packet header
@@ -42,7 +47,7 @@ class LSCServoController:
         ports = serial.tools.list_ports.comports()
         for port, desc, hwid in ports:
             if COM_PORT_NAME in desc:
-                print("Found serial port %s %s", port, desc)
+                log.info("Found serial port %s %s", port, desc)
                 return port
         raise Exception("Serial port not found")
 
@@ -103,23 +108,23 @@ class LSCServoController:
         params = [len(servo_ids)] + servo_ids
         self.send_command(self.CMD_MULT_SERVO_UNLOAD, params)
 
-    # def read_servo_positions(self, servo_ids: list[int]) -> dict[int, int]:
-    #     params = [len(servo_ids)] + servo_ids
-    #     packet = bytearray(self.HEADER + [len(params) + 2, self.CMD_MULT_SERVO_POS_READ] + params)
-    #     self.ser.reset_input_buffer()
-    #     self.ser.reset_output_buffer()
-    #     assert self.ser.write(packet) == len(packet)
-    #     self.ser.flush()
-    #     time.sleep(2)
-    #     response = self.ser.read(len(self.HEADER) + 3 + 3 * len(servo_ids))
-    #     if len(response) < 5:
-    #         raise ValueError("Invalid response: [%s]" % ", ".join(hex(n) for n in response))
-    #     positions = {}
-    #     for i in range(len(servo_ids)):
-    #         servo_id = response[len(self.HEADER) + 3 + i * 3]
-    #         position = response[len(self.HEADER) + 5 + i * 3] | (response[len(self.HEADER) + 4 + i * 3] << 8)
-    #         positions[servo_id] = position
-    #     return positions
+    def read_servo_positions(self, servo_ids: list[int] = list(SERVO_LIMITS.keys())) -> dict[int, int]:
+        params = [len(servo_ids)] + servo_ids
+        packet = bytearray(self.HEADER + [len(params) + 2, self.CMD_MULT_SERVO_POS_READ] + params)
+        # self.ser.reset_input_buffer()
+        # self.ser.reset_output_buffer()
+        assert self.ser.write(packet) == len(packet)
+        self.ser.flush()
+        time.sleep(1)
+        response = self.ser.read(len(self.HEADER) + 3 + 3 * len(servo_ids))
+        if len(response) < 5:
+            raise ValueError("Invalid response: [%s]" % ", ".join(hex(n) for n in response))
+        positions = {}
+        for i in range(len(servo_ids)):
+            servo_id = response[len(self.HEADER) + 3 + i * 3]
+            position = response[len(self.HEADER) + 5 + i * 3] | (response[len(self.HEADER) + 4 + i * 3] << 8)
+            positions[servo_id] = position
+        return positions
 
     def __del__(self):
         try:
