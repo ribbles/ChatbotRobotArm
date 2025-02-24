@@ -1,9 +1,7 @@
-import os
-import faulthandler
-import requests
-import signal
-import base64
 import logging
+import os
+import requests
+import base64
 from time import sleep
 import json
 from io import BytesIO
@@ -13,35 +11,11 @@ import speech_recognition as sr
 
 from typing import Dict, List
 
+# locals
+import ollama
+import prompts
+from logs import setup_logging
 from lsc_servo_client import LSCServoController
-
-
-class ColorFormatter(logging.Formatter):
-    COLORS = {
-        "DEBUG": "\033[94m",  # Blue
-        "INFO": "\033[92m",   # Green
-        "WARNING": "\033[93m", # Yellow
-        "ERROR": "\033[91m",   # Red
-        "CRITICAL": "\033[95m" # Magenta
-    }
-    RESET = "\033[0m"
-
-    def format(self, record):
-        log_color = self.COLORS.get(record.levelname, self.RESET)
-        record.levelname = f"{log_color}{record.levelname}{self.RESET}"
-        return super().format(record)
-
-
-def setup_logging():
-    handler = logging.StreamHandler()
-    formatter = ColorFormatter(
-        "%(asctime)s.%(msecs)03d\t%(levelname)s\t%(name)s\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    handler.setFormatter(formatter)
-    logger = logging.getLogger()
-    logger.handlers = [handler]
-    logging.getLogger("connectionpool").setLevel(logging.DEBUG)
 
 
 setup_logging()
@@ -49,75 +23,16 @@ log = logging.getLogger("RobotArm")
 log.setLevel(logging.DEBUG)
 
 
-ARM_SERIAL_PORT = "auto"
 WEBCAM_URL = "http://10.0.0.27"
 OLLAMA_URL = "http://10.0.0.205:11434/api/chat"
 # OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL = "llama3.2-vision"
 
-
-CHATBOT_INITIAL_PROMPT = """
-You are controlling a 6DOF robotic arm and a webcam.
-Every user request includes up to 4 webcam images in a mosaic to give you real-time visual context. 
-Top-left is latest, followed by top-right, bottom-left & lower-right.
-Use the images to inform how you move the arm.
-Responses must be strictly formatted as JSON, structure as follows:
-{
-  "message": "Optional human-readable message for feedback.",  // the user will see this
-  "tool_calls": [
-    {
-      "servo_id": 1,          // A number between 1 and 6 indicating the servo to move. 1 is the pincer.
-      "position": 1500,       // A number between 500 and 2500 representing the target position, except servo 1 which is limited to the range 1200 to 1800.
-    }
-  ]
-}
-Guidelines:
-- Each reponse creates a single arm movement, of 1 or more servos
-- Both the "message" and "tool_calls" keys are optional
-- If you include tool_calls, each tool_call object must have the fields servo_id & position
-- You can include zero, one, or multiple tool_call objects in the tool_calls array
-- Use the "message" field to summarise your actions and help rememeber what you have done.
-Now, with the current webcam image in hand, please confirm that you are ready by executing an initial command.
-For example, you might start by moving the arm slightly to signal readiness.
-If you can't see the arm, please stop sending tool_calls and report as such in the message.
-You should move the arm around to see which direction the servos move.
-Ready? Please confirm that you can see the robot arm in the image, and move the arm.
-"""
-
-FORMAT = {
-    "type": "object",
-    "properties": {
-        "message": {
-            "type": "string",
-        },
-        "tool_calls": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                "servo_id": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 6,
-                },
-                "position": {
-                    "type": "integer",
-                    "minimum": 500,
-                    "maximum": 2500,
-                }
-                },
-                "required": [
-                    "servo_id",
-                    "position"
-                ]
-            }
-        }
-    }
-}
+# Model must support vision, thus LLAVA
+LLAVA_MODEL = "llama3.2-vision"
 
 
 def run():
-    ollama_chat = None
+    ollama_chat = {}
     log.debug("Initializing Text-to-speech engine...")
     tts_engine = pyttsx3.init()
     log.debug("Initializing Speech-to-text engine...")
@@ -129,10 +44,12 @@ def run():
             tts_engine.runAndWait()
 
             log.debug("Initializing arm...")
-            arm = LSCServoController(ARM_SERIAL_PORT)
+            arm = LSCServoController()
 
-            ollama_chat = build_prompt()
-            user_prompt = CHATBOT_INITIAL_PROMPT
+            ollama_chat = ollama.build_prompt(LLAVA_MODEL)
+            user_prompt = prompts.START
+
+            # main loop
             while True:
                 if user_prompt:
                     loop(arm, tts_engine, ollama_chat, user_prompt)
@@ -141,46 +58,47 @@ def run():
                 user_prompt = listen(source, recognizer)
 
         finally:
-            try:
-                ollama_chat["images"] = ["deleted"]
-                log.info("ollama_chat log", extra={"data": ollama_chat})
-            except Exception:
-                pass
-            try:
-                tts_engine.stop()
-            except Exception:
-                pass
+            ollama_chat["images"] = ["deleted"]
+            log.info("ollama_chat log", extra={"data": ollama_chat})
+            tts_engine.stop()
     
 def loop(arm, tts_engine, ollama_chat: Dict, user_prompt: str):
     while True:
         # generate image
         IMAGE_HISTORY.append(fetch_image_from_url(WEBCAM_URL))
         ollama_chat["images"] = [build_image_montage()]
+
         # send prompt
         ollama_chat["messages"].append({"role":"user","content":user_prompt})
         response = chat(OLLAMA_URL, ollama_chat)
         log.debug("ollama response", extra={"data": response})
+        log.info("TIMING: Prompt:%sms, Load:%sms, Eval:%sms", response["prompt_eval_duration"]/1000000, response["load_duration"]/1000000, response["eval_duration"]/1000000)
+
         # parse response
         message = response["message"]
         ollama_chat["messages"].append(message)
         content = json.loads(message["content"])
+
         # display and speak response
-        log.warning("ROBOT: %s", content["message"])
+        log.warning("\tROBOT: %s", content["message"])
         if content["message"]:
             tts_engine.say(content["message"])
             tts_engine.runAndWait()
+
         # validation
         if "tool_calls" not in content or len(content["tool_calls"]) == 0:
             log.info("No more commands. Exiting")
             return
+
         # command robot arm
         tool_calls = content["tool_calls"]
-        log.warning("\tCommands")
+        log.warning("\tCommands:")
         for tool_call in tool_calls:
             log.warning("\t\t%s", tool_call)
         send_commands_to_arm(arm, tool_calls)
+
         # since chatbot hasn't stopped sending commands, keep prompting for more
-        user_prompt = "Here's the latest image from the webcam. Please continue..."
+        user_prompt = prompts.CONTINUE
 
 # base64 encoded
 IMAGE_HISTORY: List[str] = []
@@ -229,18 +147,6 @@ def fetch_image_from_url(url: str) -> str:
     image_data = buffer[:buffer.index(b"\xff\xd9") + 2]
     return base64.b64encode(image_data).decode('utf-8')
 
-def build_prompt() -> Dict:
-    return {
-        "model": OLLAMA_MODEL,
-        "messages": [],
-        "stream": False,
-        "options": {
-            "temperature": 1.0
-        },
-        "keep_alive": 20 * 60,  # 20 minutes
-        "format": FORMAT,
-        "images":[]
-    }
 
 def chat(url: str, prompt: Dict) -> Dict:
     try:
